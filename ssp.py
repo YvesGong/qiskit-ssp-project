@@ -7,6 +7,7 @@ from scipy.optimize import curve_fit
 import json # For saving results later (good practice)
 import time # To time the simulation loop
 import os   # To check if results file exists
+import random # For generating random numbers for Pauli noise
 
 # --- Qiskit Imports ---
 # Core components for circuit creation and transpilation
@@ -24,520 +25,466 @@ print("--- Configuration ---")
 
 # Simulation parameters
 SHOTS = 4096             # Number of times to run each circuit simulation
-NUM_QUBITS = 2           # Working wih a 2-qubit system (based on analysis)
+NUM_QUBITS = 2           # Working with a 2-qubit system
 
 # M values to simulate (list of even numbers of CNOT gates)
 M_values = [2, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256]
 
-# Measurement bases to iterate through
-BASES = ['X', 'Y', 'Z']
+# New measurement basis combinations
+BASES = ['XX', 'YY', 'ZZ', 'XY', 'YX', 'XZ', 'ZX', 'YZ', 'ZY']
 
 # Noise Parameters
-# Probability for the 2-qubit Pauli error applied after each CX gate
-prob_cx_pauli = 0.01     # Example: 1% total Pauli error probability
+# Total probability for any of the 15 non-identity 2-qubit Pauli errors to occur after a CX gate.
+# The remaining probability (1 - TOTAL_PAULI_ERROR_PROB) will be for the 'II' (identity) operation.
+TOTAL_PAULI_ERROR_PROB = 0.03  # Example: 3% total error probability for non-Identity Paulis
+PAULI_NOISE_SEED = 42 # Seed for reproducibility of random Pauli error distribution
 
-# Results file path (for saving raw counts data after simulation)
-RESULTS_FILENAME = "simulation_counts.json"
+# Results file path
+RESULTS_FILENAME = "simulation_counts_custom_pauli_v3.json"
 
-# Plot file path (for saving the final plot)
-PLOT_FILENAME = "survival_plot_extended.png"
+# Plot directory (plots will be saved here with dynamic names)
+PLOT_DIR = "plots_custom_pauli_v3" # Corrected from plot_custom_pauli_v3
+if not os.path.exists(PLOT_DIR):
+    os.makedirs(PLOT_DIR)
 
 # Option to re-run simulations even if results file exists
-# Set to True to force re-running Phase 4
-FORCE_RERUN_SIMULATIONS = False
+FORCE_RERUN_SIMULATIONS = False # Set to True to force re-running Phase 4
 
 # Print configuration to console for verification
 print(f"Shots per circuit: {SHOTS}")
 print(f"Number of qubits: {NUM_QUBITS}")
 print(f"M values to simulate: {M_values}")
 print(f"Measurement bases: {BASES}")
-print(f"CX Pauli Error Probability: {prob_cx_pauli}")
+print(f"Total Pauli Error Probability (for non-II): {TOTAL_PAULI_ERROR_PROB}")
+print(f"Pauli Noise Seed: {PAULI_NOISE_SEED}")
 print(f"Results will be saved to: {RESULTS_FILENAME}")
-print(f"Plot will be saved to: {PLOT_FILENAME}")
+print(f"Plots will be saved to directory: {PLOT_DIR}")
 print(f"Force re-run simulations: {FORCE_RERUN_SIMULATIONS}")
 print("-" * 20 + "\n")
 
 # --- End of Phase 1 ---
 
 # Phase 2: Define Noise Model
-print("--- Defining Noise Model ---")
+print("--- Defining Custom Pauli Noise Model ---")
 
-# 1. Define the specific Pauli errors and their probabilities for the CX gate.
-"""
-We'll use the symmetric model discussed: total probability 'prob_cx_pauli' is split
-equally among single-qubit Pauli errors (X, Y, Z) occurring on *either* the control
-or the target qubit after the CX gate. There are 6 such non-identity single-qubit
-Pauli errors (IX, IY, IZ, XI, YI, ZI).
-"""
-num_single_pauli_errors = 6
-prob_per_pauli_error = (prob_cx_pauli / num_single_pauli_errors)
+# Set the seed for numpy's random number generator for Pauli error distribution
+np.random.seed(PAULI_NOISE_SEED)
+random.seed(PAULI_NOISE_SEED) # Also for python's random, if used directly
 
-# Calculate the probability of the identity (no error occurring)
-# This is 1 minus the sum of probabilities of all specified error terms.
-prob_identity = 1.0 - prob_cx_pauli
-
-# List of (PauliString, Probability) pairs, now including the identity 'II'
-# The sum of probabilities in this list should now be 1.0
-pauli_errors_for_cx_complete = [
-    ('II', prob_identity),     # Probability of no error
-    ('IX', prob_per_pauli_error), ('IY', prob_per_pauli_error), ('IZ', prob_per_pauli_error),
-    ('XI', prob_per_pauli_error), ('YI', prob_per_pauli_error), ('ZI', prob_per_pauli_error)
+# 1. Define the 15 non-identity 2-qubit Pauli strings
+pauli_ops_2q_non_identity = [
+    'IX', 'IY', 'IZ', 'XI', 'YI', 'ZI',
+    'XX', 'XY', 'XZ', 'YX', 'YY', 'YZ', 'ZX', 'ZY', 'ZZ'
 ]
-print(f"Pauli errors defined for CX gate (Identity prob={prob_identity:.4f}, Error prob={prob_per_pauli_error:.4f} each):")
-print(pauli_errors_for_cx_complete)
+num_non_identity_paulis = len(pauli_ops_2q_non_identity) # Should be 15
+
+# 2. Generate a random vector to distribute the TOTAL_PAULI_ERROR_PROB
+# Create 14 random numbers strictly between 0 and 1
+rand_points = sorted([0.0] + [random.uniform(1e-9, 1.0-1e-9) for _ in range(num_non_identity_paulis - 1)] + [1.0])
+
+# 3. Calculate differences to get 15 proportions that sum to 1
+proportions = [rand_points[i+1] - rand_points[i] for i in range(num_non_identity_paulis)]
+# Ensure proportions sum to 1 (approximately)
+# print(f"Sum of proportions: {sum(proportions)}") # Debug
+
+# 4. Scale these proportions by TOTAL_PAULI_ERROR_PROB
+# These are the probabilities for each of the 15 non-identity Pauli errors
+individual_error_probs = [p * TOTAL_PAULI_ERROR_PROB for p in proportions]
+
+# 5. Calculate the probability of the Identity 'II' (no error)
+prob_identity = 1.0 - TOTAL_PAULI_ERROR_PROB
+if prob_identity < 0:
+    raise ValueError(f"TOTAL_PAULI_ERROR_PROB ({TOTAL_PAULI_ERROR_PROB}) is > 1, which is not allowed.")
+
+# 6. Construct the list of (PauliString, Probability) pairs for the QuantumError
+pauli_errors_for_cx_complete = [('II', prob_identity)]
+for i in range(num_non_identity_paulis):
+    pauli_errors_for_cx_complete.append((pauli_ops_2q_non_identity[i], individual_error_probs[i]))
+
+print(f"Pauli errors defined for CX gate (Total Error Prob={TOTAL_PAULI_ERROR_PROB}):")
+for pauli_op, prob in pauli_errors_for_cx_complete:
+    print(f"  {pauli_op}: {prob:.6f}")
+
 # Sanity check: Ensure the probabilities sum to approximately 1
 total_prob_check = sum(prob for _, prob in pauli_errors_for_cx_complete)
-print(f"Sanity check: Sum of probabilities = {total_prob_check:.6f}")    # Should be very close to 1.0
+print(f"Sanity check: Sum of all Pauli channel probabilities = {total_prob_check:.6f}") # Should be very close to 1.0
 
-# 2. Create the QuantumError object representing this Pauli channel
-# Use the complete list that includes the 'II' term.
+# 7. Create the QuantumError object
 try:
-    # Ensure the sum is close enough to 1 for numerical stability
     if not np.isclose(total_prob_check, 1.0):
         raise ValueError(f"Probabilities do not sum to 1 ({total_prob_check}), cannot create Pauli error.")
-    
     cx_pauli_channel: QuantumError = pauli_error(pauli_errors_for_cx_complete)
-    print("Successfully created Pauli error channel object.")
-
+    print("Successfully created custom Pauli error channel object.")
 except Exception as e:
     print(f"Error creating Pauli error channel: {e}")
-    # Handle error appropriately, maybe exit or use a default
-    cx_pauli_channel = None   # Set to None or handle error
+    cx_pauli_channel = None # Handle error appropriately
 
-# 3. Create an empty NoiseModel
+# 8. Create an empty NoiseModel
 noise_model = NoiseModel()
 print("Created empty NoiseModel.")
 
-# 4. Add the Pauli error channel to the NoiseModel.
-# This applies the 'cx_pauli_channel' to all instances of the 'cx' gate.
+# 9. Add the Pauli error channel to the NoiseModel for 'cx' gates
 if cx_pauli_channel:
     noise_model.add_all_qubit_quantum_error(cx_pauli_channel, ['cx'])
-    print("Added Pauli error channel to 'cx' gates in the noise model.")
-
+    print("Added custom Pauli error channel to 'cx' gates in the noise model.")
 else:
     print("Skipping adding Pauli error due to creation failure.")
 
-# 5. Instantiate the AerSimulator instances
-# One with the noise model, one ideal (no noise)
+# 10. Instantiate the AerSimulator instances
 sim_noise = AerSimulator(noise_model=noise_model)
-sim_ideal = AerSimulator()      # No noise model argument means ideal simulation
+sim_ideal = AerSimulator()
 
 print("Created AerSimulator instances (noisy and ideal).")
 print("-" * 20 + "\n")
-
 # --- End of Phase 2 ---
 
-# Phase 3: Define Circuit Generation Function
-print("--- Defining Circuit Generation Functions ---")
+# Phase 3: Define Circuit Generation Functions
+print("--- Defining Circuit Generation Functions (v3.1) ---")
 
 # 1. Define the CNOT pattern function (Alternating CX gates)
-def add_alternating_cnots(qc: QuantumCircuit, M: int):
-    """
-    Applies M CNOT gates, alternating between CX(0, 1) and CX(1, 0).
-    """
-    if (M < 0):
+def add_cnots(qc: QuantumCircuit, M: int):
+    if M < 0:
         raise ValueError("Number of CNOT gates (M) cannot be negative.")
-    
     for i in range(M):
-
-        if (i % 2 == 0):
-            # Even index (0, 2, 4...): Apply CNOT(0, 1)
+        if i % 2 == 0: # Even index: CX(0, 1)
             qc.cx(0, 1)
-        
-        else:
-            # Odd index (1, 3, 5...): Apply CNOT(1, 0)
-            qc.cx(1, 0)
-        
-        # Add a barrier for visual separation after the CNOT block
-        qc.barrier()
+        else: # Odd index: CX(1, 0)
+            qc.cx(0, 1)
+        # Add a barrier after each CNOT for visual separation if M > 0
+        # This matches the user's example circuit diagram.
+        if M > 0:
+             qc.barrier()
 
-# 2. Define the map for basis change gates before measurement
-basis_gate_map = {
-    'X': [('h', 0), ('h', 1)],                            # H on both qubits
-    'Y': [('sdg', 0), ('h', 0), ('sdg', 1), ('h', 1)],    # Apply Sdg then H to each qubit (to measure in Y basis: |0> -> |+i>, |1> -> |-i>)
-    'Z': []                                               # No gates needed for Z basis
+# 2. Define the basis transformation gates (initial and final)
+basis_transformations = {
+    'X': {
+        'initial': [('h', None)],
+        'final':   [('h', None)]
+    },
+    'Y': {
+        'initial': [('h', None), ('s', None)],
+        'final':   [('sdg', None), ('h', None)]
+    },
+    'Z': {
+        'initial': [],
+        'final':   []
+    }
 }
-print("Defined CNOT pattern function (alternating) and basis gate map.")
+print("Defined CNOT pattern function and new basis transformation map.")
 
 # 3. Define the main circuit generation function
-def create_measurement_circuit(M: int, basis: str) -> QuantumCircuit:
-    """
-    Creates a 2-qubit circuit for noise analysis.
+def create_measurement_circuit(M: int, basis_str: str) -> QuantumCircuit:
+    if not (isinstance(basis_str, str) and len(basis_str) == 2 and \
+            basis_str[0] in basis_transformations and basis_str[1] in basis_transformations):
+        raise ValueError(f"Invalid basis_str '{basis_str}'. Must be 2 chars from {list(basis_transformations.keys())}")
 
-    Structure:
-    1. Initial H gates on both qubits.
-    2. M alternating CNOT gates (CX(0, 1), CX(1, 0), ...).
-    3. Final basis change gates (determine by 'basis').
-    4. Measurement in the Z-basis.
+    basis_q0 = basis_str[0]
+    basis_q1 = basis_str[1]
 
-    Args:
-        M: The total number of alternating CNOT gates to apply.
-        basis: The desired measurement basis ('X', 'Y', or 'Z').
+    qc = QuantumCircuit(NUM_QUBITS, NUM_QUBITS, name=f"M={M}_basis={basis_str}")
+
+    # Apply initial transformation gates
+    for gate_name, _ in basis_transformations[basis_q0]['initial']:
+        getattr(qc, gate_name)(0)
+    for gate_name, _ in basis_transformations[basis_q1]['initial']:
+        getattr(qc, gate_name)(1)
     
-    Returns:
-        The constructed QuantumCircuit object.
+    if basis_transformations[basis_q0]['initial'] or basis_transformations[basis_q1]['initial']:
+        qc.barrier()
 
-    Raises:
-        ValueError: If the specified basis is not 'X', 'Y', or 'Z'.
-    """
-    if basis not in basis_gate_map:
-        raise ValueError(f"Invalid basis '{basis}'. Must be one of {list(basis_gate_map.keys())}")
+    add_cnots(qc, M) # Barriers are now added inside this function
 
-    # Create the quantum circuit with 2 qubits and 2 classical bits
-    qc = QuantumCircuit(NUM_QUBITS, NUM_QUBITS, name=f"M={M}_basis={basis}")
-
-    # Apply initial Hadamard gates to create superposition state |++>
-    qc.h(range(NUM_QUBITS))
-    qc.barrier() # Visual separator
-
-    # Add the sequence of M alternating CNOT gates
-    add_alternating_cnots(qc, M)
-    # Barrier added within add_alternating_cnots
-    # Apply final basis change gates
-    final_gates = basis_gate_map[basis]
-    
-    if final_gates:   # Only add if there are gates for this basis
+    for gate_name, _ in basis_transformations[basis_q0]['final']:
+        getattr(qc, gate_name)(0)
+    for gate_name, _ in basis_transformations[basis_q1]['final']:
+        getattr(qc, gate_name)(1)
         
-        for gate_name, qubit_index in final_gates:
-            # getattr gets the method (like qc.h, qc.sdg) by name
-            getattr(qc, gate_name)(qubit_index)
-        
-        qc.barrier() # Visual separator
+    if basis_transformations[basis_q0]['final'] or basis_transformations[basis_q1]['final']:
+        qc.barrier()
     
-    # Add measurement operations
     qc.measure(range(NUM_QUBITS), range(NUM_QUBITS))
     return qc
 
 print("Defined main circuit generation function 'create_measurement_circuit'.")
 
-# --- Example Usage ---
 test_M = 4
-test_basis = 'X'
-example_circuit= create_measurement_circuit(test_M, test_basis)
-print(f"\nExample circuit for M={test_M}, basis={test_basis}:")
+test_basis_str = 'XY'
+example_circuit = create_measurement_circuit(test_M, test_basis_str)
+print(f"\nExample circuit for M={test_M}, basis={test_basis_str}:")
 print(example_circuit.draw('text'))
-
 print("-" * 20 + "\n")
-
 # --- End of Phase 3 ---
 
 # Phase 4: Run Simulations (or Load Results)
-print("--- Running Simulations or Loading Results ---")
+print("--- Running Simulations or Loading Results (v3.1) ---")
 
-# Initialise dictionaries to store the results (counts)
-# Try loading first
 ideal_counts = {}
 noisy_counts = {}
-simulation_duration = 0
-needs_rerun = FORCE_RERUN_SIMULATIONS
+simulation_duration_total = 0
+needs_rerun_overall = FORCE_RERUN_SIMULATIONS
+config_changed = False
 
-# Check if results file exists and if we should load it
-if ((os.path.exists(RESULTS_FILENAME)) and (not FORCE_RERUN_SIMULATIONS)):
+if os.path.exists(RESULTS_FILENAME) and not FORCE_RERUN_SIMULATIONS:
     print(f"Loading existing results from {RESULTS_FILENAME}...")
-
     try:
-
         with open(RESULTS_FILENAME, 'r') as f:
             results_data = json.load(f)
-        # Extract data (Need to convert keys back to int for M_values if loading from JSON)
-        loaded_M_values = results_data.get('M_values', M_values) # Use saved M_values if available
-        ideal_counts = {int(k): v for k, v in results_data.get('ideal_counts', {}).items()}
-        noisy_counts = {int(k): v for k, v in results_data.get('noisy_counts', {}).items()}
-        simulation_duration = results_data.get('simulation_duration_sec', 0)
         
-        # Check if all M_values in the script are present in the loaded data
-        if not all(m in loaded_M_values for m in M_values):
-            print("Not all required M values found in the results file. Will run simulations for missing values.")
-            needs_rerun = True
-        
+        loaded_M_values = results_data.get('M_values', [])
+        loaded_BASES = results_data.get('bases', [])
+        loaded_total_pauli_error_prob = results_data.get('total_pauli_error_prob', -1)
+
+        if M_values != loaded_M_values or \
+           BASES != loaded_BASES or \
+           not np.isclose(TOTAL_PAULI_ERROR_PROB, loaded_total_pauli_error_prob):
+            print("Configuration (M_values, BASES, or error probability) has changed. Re-running all simulations.")
+            needs_rerun_overall = True
+            config_changed = True
         else:
-            print(f"Results loaded successfully. Simulation duration from file: {simulation_duration:.2f} seconds.") 
-    
+            ideal_counts = {int(k): v for k, v in results_data.get('ideal_counts', {}).items()}
+            noisy_counts = {int(k): v for k, v in results_data.get('noisy_counts', {}).items()}
+            simulation_duration_total = results_data.get('simulation_duration_sec', 0)
+            print(f"Results loaded. Stored simulation duration: {simulation_duration_total:.2f}s.")
+            
+            for m_val in M_values:
+                if m_val not in ideal_counts or m_val not in noisy_counts:
+                    needs_rerun_overall = True; break
+                for basis_str_check in BASES: # Renamed to avoid conflict
+                    if basis_str_check not in ideal_counts.get(m_val, {}) or \
+                       basis_str_check not in noisy_counts.get(m_val, {}):
+                        needs_rerun_overall = True; break
+                if needs_rerun_overall: break
+            if needs_rerun_overall and not config_changed:
+                 print("Not all required M values/BASES found in the results file. Will run simulations for missing parts.")
+
     except Exception as e:
-        print(f"Error loading results file: {e}. Re-running simulations.")
-        needs_rerun = True # Force re-run if loading fails.
-        ideal_counts = {}  # Reset dictionaries if loading failed
+        print(f"Error loading results file: {e}. Re-running all simulations.")
+        needs_rerun_overall = True
+        ideal_counts = {}
         noisy_counts = {}
-        simulation_duration = 0
-
+        simulation_duration_total = 0
 else:
-    # File doesn't exist or force re-run is True
-    needs_rerun = True
-    print("Results file not found or re-run forced.")
+    needs_rerun_overall = True
+    if not FORCE_RERUN_SIMULATIONS:
+        print("Results file not found or re-run forced because config changed.")
+    else: # This case implies FORCE_RERUN_SIMULATIONS is True
+        print("Forcing re-run of all simulations.")
 
-# If we need to run simulations (either all or just missing ones)
-if needs_rerun:
-    print("Running simulations (for all or missing M values)...")
 
-    # Record start time only for the simulations we are running now
-    simulation_start_time = time.time()
-    new_sims_run = False # Flag to check if we actually ran new simulations
+if needs_rerun_overall:
+    print("Running simulations...")
+    current_simulation_start_time = time.time()
+    new_sims_actually_run_this_session = False
 
-    # Outer loop: Iterate through the M values defined in the script
-    for M in M_values:
-        # Initialise inner dictionaries if M is new
-        if M not in noisy_counts: noisy_counts[M] = {}
-        if M not in ideal_counts: ideal_counts[M] = {}
+    for M_iter in M_values: # Renamed M to M_iter to avoid conflict with outer scope M if any
+        if M_iter not in noisy_counts or config_changed or FORCE_RERUN_SIMULATIONS: noisy_counts[M_iter] = {}
+        if M_iter not in ideal_counts or config_changed or FORCE_RERUN_SIMULATIONS: ideal_counts[M_iter] = {}
 
-        # Check if data for this M already exists (from loaded file)
-        # We need to run if either ideal or noisy data is missing for any basis
-        should_run_for_M = False
-
-        if ((M not in ideal_counts) or (M not in noisy_counts)):
-            should_run_for_M = True
-        
-        else:
-
-            for basis in BASES:
-                
-                if ((basis not in ideal_counts.get(M, {})) or (basis not in noisy_counts.get(M, {}))):
-                    should_run_for_M = True
-                    break 
-        
-        if not should_run_for_M:
-            print(f"--- M = {M}: Data already loaded. Skipping simulation. ---")
-            continue # Skip to the next M value if data exists
-
-        # If we need to run simulations for this M:
-        new_sims_run = True
-        print(f"--- M = {M} ---")
-
-        # Inner loop: Iterate through the measurement bases (X, Y, Z)
-        for basis in BASES:
-            # Check if data for this specific basis exists before running
-            if ((basis in ideal_counts.get(M, {})) and (basis in noisy_counts.get(M, {}))):
-                print(f"  Skipping basis {basis} (already loaded).")
+        print(f"--- M = {M_iter} ---")
+        for basis_str_iter in BASES: # Renamed basis_str to basis_str_iter
+            if not (config_changed or FORCE_RERUN_SIMULATIONS) and \
+               basis_str_iter in ideal_counts.get(M_iter, {}) and \
+               basis_str_iter in noisy_counts.get(M_iter, {}):
+                print(f"  Skipping basis {basis_str_iter} (already loaded and config unchanged).")
                 continue
 
-            print(f"  Simulating basis: {basis}")
-
-            # 1. Generate the circuit for the current M and basis
+            new_sims_actually_run_this_session = True
+            print(f"  Simulating basis: {basis_str_iter}")
             try:
-                qc = create_measurement_circuit(M, basis)
-        
-            except ValueError as e:
-                print(f"    Error generating circuit: {e}")
-                continue   # Skip to next basis if circuit generation fails
+                qc = create_measurement_circuit(M_iter, basis_str_iter)
+            except ValueError as e: # Corrected ValuError to ValueError
+                print(f"    Error generating circuit for M={M_iter}, basis={basis_str_iter}: {e}")
+                ideal_counts[M_iter][basis_str_iter] = {} 
+                noisy_counts[M_iter][basis_str_iter] = {}
+                continue
 
-            # --- Ideal Simulation ---
             try:
-                # 2a. Transpile the circuit for the ideal simulator
-                #   (Optimisation level 0 is often sufficient for ideal sims)
                 qc_ideal_t = transpile(qc, sim_ideal, optimization_level=0)
-
-                # 3a. Run the ideal simulation
                 job_ideal = sim_ideal.run(qc_ideal_t, shots=SHOTS)
                 result_ideal = job_ideal.result()
-
-                # 4a. Get the counts and store them
-                ideal_counts[M][basis] = result_ideal.get_counts(qc_ideal_t) # Pass circuit for correct key format
-                print(f"    Ideal counts: {ideal_counts[M][basis]}")
-        
+                ideal_counts[M_iter][basis_str_iter] = result_ideal.get_counts(qc_ideal_t)
+                # print(f"    Ideal counts for M={M_iter}, basis={basis_str_iter}: {ideal_counts[M_iter][basis_str_iter]}") 
             except Exception as e:
-                print(f"    Error during IDEAL simulation for M={M}, basis={basis}: {e}")
-                ideal_counts[M][basis] = {} # Store empty dict on error
-        
-            # --- Noisy Simulation ---
-            try:
-                # 2b. Transpile the circuit for the noisy simulator
-                #   (Need basis_gates from noise model for better transpilation)
-                #   Optimisation level might need adjustment based on noise model complexity
-                qc_noisy_t = transpile(qc, sim_noise, optimization_level=1) # Use level 1 for some optimisation
+                print(f"    Error during IDEAL simulation for M={M_iter}, basis={basis_str_iter}: {e}") # Used basis_str_iter
+                ideal_counts[M_iter][basis_str_iter] = {}
 
-                # 3b. Run the noisy simulation
+            try:
+                qc_noisy_t = transpile(qc, sim_noise, optimization_level=1)
                 job_noisy = sim_noise.run(qc_noisy_t, shots=SHOTS)
                 result_noisy = job_noisy.result()
-
-                # 4b. Get the counts and store them
-                noisy_counts[M][basis] = result_noisy.get_counts(qc_noisy_t) # Pass circuit for correct key format
-                print(f"    Noisy counts: {noisy_counts[M][basis]}")
-        
+                noisy_counts[M_iter][basis_str_iter] = result_noisy.get_counts(qc_noisy_t)
+                # print(f"    Noisy counts for M={M_iter}, basis={basis_str_iter}: {noisy_counts[M_iter][basis_str_iter]}")
             except Exception as e:
-                print(f"    Error during NOISY simulation for M={M}, basis={basis}: {e}")
-                noisy_counts[M][basis] = {}   # Store empty dict on error
+                print(f"    Error during NOISY simulation for M={M_iter}, basis={basis_str_iter}: {e}")
+                noisy_counts[M_iter][basis_str_iter] = {}
+    
+    if new_sims_actually_run_this_session or config_changed or FORCE_RERUN_SIMULATIONS :
+        current_simulation_duration = time.time() - current_simulation_start_time # Corrected variable name
+        print(f"\n--- Simulation Run Complete ---")
+        print(f"Time for simulations in this session: {current_simulation_duration:.2f} seconds") # Used current_simulation_duration
+        
+        if config_changed or FORCE_RERUN_SIMULATIONS:
+            simulation_duration_total = current_simulation_duration
+        else: 
+            simulation_duration_total += current_simulation_duration
 
-    # Record end time and calculate duration ONLY for the sims just run
-    if new_sims_run:
-        simulation_end_time = time.time()
-        current_simulation_duration = simulation_end_time - simulation_start_time
-        print(f"\n--- Simulation Complete (New M values) ---")
-        print(f"Time for new simulations: {simulation_duration:.2f} seconds")
-        # For simplicity, we'll just save the total data now.
-        simulation_duration += current_simulation_duration # Add to total duration if needed
-
-        # --- Save Updated Results to File (Good Practice) ---
-        results_data = {
-            # Save the potentially updated M_values list from the script
+        results_data_to_save = {
             'M_values': M_values,
             'bases': BASES,
             'shots': SHOTS,
-            'prob_cx_pauli': prob_cx_pauli,
-            # Convert M_values keys to strings for JSON compatibility
+            'total_pauli_error_prob': TOTAL_PAULI_ERROR_PROB,
+            'pauli_noise_seed': PAULI_NOISE_SEED,
             'ideal_counts': {str(k): v for k, v in ideal_counts.items()},
             'noisy_counts': {str(k): v for k, v in noisy_counts.items()},
-            'simulation_duration_sec': simulation_duration        # Save potentially updated duration
+            'simulation_duration_sec': simulation_duration_total
         }
-
         try:
-
             with open(RESULTS_FILENAME, 'w') as f:
-                json.dump(results_data, f, indent=4) # Use indent for readability
-    
+                json.dump(results_data_to_save, f, indent=4)
             print(f"Successfully saved simulation results to {RESULTS_FILENAME}")
-
         except Exception as e:
             print(f"Error saving results to {RESULTS_FILENAME}: {e}")
-    
     else:
-        print("No new simulations were required.")
+        print("No new simulations were required in this session.")
 
-# Ensure the counts dictionaries are available if loaded/run
-if ((not ideal_counts) or (not noisy_counts)):
-    print("Error: Failed to load or run simulations. Counts data is missing.")
-    # Exit or handle error appropriately
+if not ideal_counts or not noisy_counts:
+    print("Error: Failed to load or run simulations. Counts data is missing. Exiting.")
     exit()
 
 print("-" * 20 + "\n")
-
 # --- End of Phase 4 ---
 
 # Phase 5: Calculate Survival Probabilities
-print("--- Calculating Survival Probabilities (P(00) in X-basis) ---")
+print("--- Calculating Survival Probabilities P(00) (v3.1) ---")
 
-# Initialise list to store the P(00) values from noisy X-basis measurements
-P00X_noisy_values = []
+P00_noisy_values_all_bases = {}
+analysis_M_values_numeric = sorted([int(m_key) for m_key in noisy_counts.keys()])
+print(f"Analysing M values: {analysis_M_values_numeric}")
 
-# Loop through the M values for which we have results
-analysis_M_values = sorted(noisy_counts.keys()) # Use keys from loaded/run data
-print(f"Analysing M values: {analysis_M_values}")
+M_values_for_analysis = [m_val for m_val in M_values if m_val in analysis_M_values_numeric]
+if not M_values_for_analysis:
+    print("Error: No M_values from config found in analysis_M_values_numeric. Check data consistency.")
+    exit()
 
-# Filter M_values from config to match available analysis_M_values for consistency
-# This ensures M_values used for plotting/fitting matches the data we actually have
-M_values_for_analysis = [m for m in M_values if m in analysis_M_values]
+for basis_str_calc in BASES: # Renamed basis_str
+    P00_noisy_values_all_bases[basis_str_calc] = []
+    print(f"\n  Calculating for basis: {basis_str_calc}")
+    for M_calc in M_values_for_analysis: # Renamed M
+        counts = noisy_counts.get(M_calc, {}).get(basis_str_calc, {})
+        p00 = counts.get('00', 0) / SHOTS
+        P00_noisy_values_all_bases[basis_str_calc].append(p00)
+        print(f"    M = {M_calc:3d}, P(00)_{basis_str_calc} = {p00:.4f}")
+    P00_noisy_values_all_bases[basis_str_calc] = np.array(P00_noisy_values_all_bases[basis_str_calc])
 
-for M in M_values_for_analysis:    # Iterate through the M values we actually have data for
-    # Get the noisy counts dictionary for the 'X' basis measurement for this M
-    counts = noisy_counts.get(M, {}).get('X', {}) # Use .get for safety
+print("\n--- Sanity Check: Ideal P(00) ---")
+for basis_str_check_ideal in BASES: # Renamed basis_str
+    print(f"  Ideal P(00) for basis: {basis_str_check_ideal}")
+    ideal_p00_check_passed_basis = True
+    all_ideal_p00_one = True # Flag to see if all P(00) are 1 for this basis
 
-    # Calculate the probability P(00) = counts['00'] / total_shots
-    # Use .get('00', 0) to handle cases where '00' might not be present (though unlikely here)
-    p00 = (counts.get('00', 0) / SHOTS)
+    for M_check in M_values_for_analysis: # Renamed M
+        ideal_basis_counts = ideal_counts.get(M_check, {}).get(basis_str_check_ideal, {})
+        ideal_p00 = ideal_basis_counts.get('00', 0) / SHOTS
+        
+        is_m_multiple_of_6 = (M_check % 6 == 0)
+        
+        print(f"    M = {M_check:3d}, Ideal P(00)_{basis_str_check_ideal} = {ideal_p00:.4f}", end="")
+        if not np.isclose(ideal_p00, 1.0):
+            all_ideal_p00_one = False
+            if is_m_multiple_of_6: # Should be 1.0 if M is multiple of 6
+                print(f"  <-- WARNING: Ideal P(00) is not 1.0, but M ({M_check}) is a multiple of 6!")
+                ideal_p00_check_passed_basis = False
+            else: # Not a multiple of 6, so P(00) != 1.0 is expected due to CNOT block.
+                print(f"  (Note: P(00) != 1.0 expected as M ({M_check}) is not a multiple of 6)")
+        else:
+            print() # Newline if no warning/note
 
-    # Append the calculated probability to our list
-    P00X_noisy_values.append(p00)
-    print(f"  M = {M:2d}, P(00)_X = {p00:.4f}")
-
-# Convert the list of probabilities to a NumPy array for easier use in fitting
-P00X_noisy_values = np.array(P00X_noisy_values)
-
-# Also convert M_values used in analysis to numpy array
-analysis_M_values = np.array(M_values_for_analysis)   # Use the filtered list
-
-# --- Sanity Check: Ideal P(00) in X-basis ---
-print("\n--- Sanity Check: Ideal P(00) in X-basis ---")
-ideal_p00_check_passed = True
-
-for M in M_values_for_analysis:    # Use the filtered list
-    ideal_x_counts = ideal_counts.get(M, {}).get('X', {})
-    ideal_p00 = (ideal_x_counts.get('00', 0) / SHOTS)
-    print(f"  M = {M:3d}, Ideal P(00)_X = {ideal_p00:.4f}")     # Adjusted formatting
-    # Check if ideal result is close to 1.0
-    if not np.isclose(ideal_p00, 1.0):
-        print("    Warning: Ideal P(00) for M={M} is not 1.0!")
-        ideal_p00_check_passed = False
-
-if ideal_p00_check_passed:
-    print("Ideal P(00)_X check passed (all are 1.0).")
-
-else:
-    print("WARING: Ideal P(00)_X check failed for some M values.")
+    if ideal_p00_check_passed_basis:
+        if all_ideal_p00_one:
+            print(f"    Ideal P(00)_{basis_str_check_ideal} check passed (all are ~1.0).")
+        else:
+            print(f"    Ideal P(00)_{basis_str_check_ideal} behavior noted (not all are 1.0, but consistent with M values).")
+    else:
+        print(f"    WARNING: Ideal P(00)_{basis_str_check_ideal} check FAILED for some M values where P(00) should have been 1.0.")
 
 print("-" * 20 + "\n")
-
 # --- End of Phase 5 ---
 
-# Phase 6: Plotting and Fitting
-print("--- Plotting and Fitting Results ---")
+# Phase 6: Plotting and Fitting (Multiple Plots)
+print("--- Plotting and Fitting Results (v3.1 - Multiple Plots) ---")
 
-# Check if we have data to plot
-if ((len(analysis_M_values) == 0) or (len(P00X_noisy_values) == 0)):
+np_M_values_for_analysis = np.array(M_values_for_analysis)
+
+def fit_func(m_vals, A, p):
+    return A * (p**m_vals) + 0.25
+
+bounds_fit = ([0, 0], [0.75, 1.0]) 
+initial_guesses_fit = [0.7, 0.99]
+
+if len(np_M_values_for_analysis) == 0:
     print("No data available for plotting and fitting. Exiting.")
     exit()
 
-else:
-    # 1. Create the plot figure
-    plt.figure(figsize=(10, 6)) # Set figure size for better readability
+for basis_str_plot in BASES: # Renamed basis_str
+    if basis_str_plot not in P00_noisy_values_all_bases or len(P00_noisy_values_all_bases[basis_str_plot]) == 0:
+        print(f"No P(00) data available for basis {basis_str_plot}. Skipping plot.")
+        continue
 
-    # 2. Plot the noisy simulation data points
-    plt.scatter(analysis_M_values, P00X_noisy_values, label='Noisy Simulation $P(00)$ (X-basis)', marker='o', color='blue')
+    current_P00_values = P00_noisy_values_all_bases[basis_str_plot]
+    
+    print(f"\n--- Plotting and Fitting for Basis: {basis_str_plot} ---")
+    
+    plt.figure(figsize=(12, 7))
+    
+    plt.scatter(np_M_values_for_analysis, current_P00_values, 
+                label=f'Noisy Sim P(00) (Basis: {basis_str_plot})', marker='o', color='blue')
 
-    # 3. Define the fittin function (Model: A * p^M + 0.25)
-    def fit_func(m, A, p):
-        """
-        Exponential decay model with baseline.
-        """
-        return A * (p**m) + 0.25
-
-    # 4. Define bounds for the parameters [A, p]
-    #   0 <= A <= 0.75
-    #   0 <= p <= 1.0
-    bounds = ([0, 0], [0.75, 1.0])
-
-    # 5. Provide initial guesses for parameters [A, p] to help the fitter
-    #   Guess A starts near 0.75, guess p starts near 1 (but slightly less)
-    initial_guesses = [0.7, 0.99]
-
-    # 6. Perform the curve fitting using scipy.optimize.curve_fit
     try:
-        # Increased maxfev just in case
-        popt, pcov = curve_fit(fit_func, analysis_M_values, P00X_noisy_values, p0=initial_guesses, bounds=bounds, maxfev=5000)
+        popt, pcov = curve_fit(fit_func, np_M_values_for_analysis, current_P00_values, 
+                               p0=initial_guesses_fit, bounds=bounds_fit, maxfev=5000)
         A_fit, p_fit = popt
-
-        # 7. Print the fitted parameters
-        print(f"Curve Fit Results:")
-        print(f"  A = {A_fit:.4f}")
-        print(f"  p = {p_fit:.4f}")
         
-        # Print standard errors
+        print(f"  Curve Fit Results for {basis_str_plot}:") # Added basis_str_plot
+        print(f"    A = {A_fit:.4f}")
+        print(f"    p = {p_fit:.4f}")
+        
         try:
             perr = np.sqrt(np.diag(pcov))
-            print(f"  Std Error: A_err = {perr[0]:.4f}, p_err = {perr[1]:.4f}")
+            print(f"    Std Error: A_err = {perr[0]:.4f}, p_err = {perr[1]:.4f}")
+        except Exception as e_stderr:
+            print(f"    Could not estimate standard errors for fit parameters: {e_stderr}") # f-string
+
+        m_plot_smooth = np.linspace(min(np_M_values_for_analysis), max(np_M_values_for_analysis), 200)
+        p00_fit_curve = fit_func(m_plot_smooth, A_fit, p_fit)
         
-        except Exception:       # Handle cases where covariance matrix is ill-defined
-            print("  Could not estimate standard errors for fit parameters.")
+        plt.plot(m_plot_smooth, p00_fit_curve, 'r-', 
+                 label=f'Fit: $A p^M + 0.25$\n$A={A_fit:.3f}$, $p={p_fit:.3f}$')
 
-        # 8. Generate points for the fitted curve for smooth plotting
-        m_plot = np.linspace(min(analysis_M_values), max(analysis_M_values), 200) # More points for smooth curve
-        p00_fit = fit_func(m_plot, A_fit, p_fit)
+    except RuntimeError as e_fit:
+        print(f"  Error during curve fitting for {basis_str_plot}: {e_fit}")
+        print("  Could not determine fit parameters. Plotting data points only.")
+    except Exception as e_gen_fit:
+        print(f"  An unexpected error occurred during fitting for {basis_str_plot}: {e_gen_fit}")
 
-        # 9. Plot the fitted curve
-        plt.plot(m_plot, p00_fit, 'r-', label=f'Fit: $A p^M + 0.25$\n$A={A_fit:3f}$, $p={p_fit:.3f}$')
-
-    except RuntimeError as e:
-        print(f"Error during curve fitting: {e}")
-        print("Could not determine fit parameters. Plotting data points only.")
-
-    except Exception as e:
-        print(f"An unexpected error occurred during fitting: {e}")
-
-    # 10. Finalise the plot
     plt.xlabel("Number of Alternating CNOT Gates (M)")
-    plt.ylabel("Survival Probability P(00) (X-basis)")
-    plt.title(f"Survival Probability vs M (CX Error Prob: {prob_cx_pauli*100:.1f}%)")
+    plt.ylabel(f"Survival Probability P(00) (Basis: {basis_str_plot})")
+    title_str = (f"Survival Probability P(00) vs. M (Basis: {basis_str_plot})\n" # vs. M
+                 f"Total Pauli Error Prob (non-II): {TOTAL_PAULI_ERROR_PROB*100:.1f}%, Seed: {PAULI_NOISE_SEED}")
+    plt.title(title_str)
     plt.legend()
     plt.grid(True, which='both', linestyle='--', linewidth=0.5)
-    plt.ylim(bottom=0) # Ensure y-axis starts at 0
+    plt.ylim(bottom=0, top=1.05) # Consistent ylim
 
-    # 11. Save the plot to a file
+    plot_filename = os.path.join(PLOT_DIR, f"survival_plot_basis_{basis_str_plot}_err_{TOTAL_PAULI_ERROR_PROB:.2f}_seed_{PAULI_NOISE_SEED}.png")
     try:
-        plt.savefig(PLOT_FILENAME, dpi=300, bbox_inches='tight') # Save with good resolution
-        print(f"Successfully saved plot to {PLOT_FILENAME}")
+        plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
+        print(f"  Successfully saved plot to {plot_filename}")
+    except Exception as e_save:
+        print(f"  Error saving plot {plot_filename}: {e_save}")
     
-    except Exception as e:
-        print(f"Error saving plot to {PLOT_FILENAME}: {e}")
-    
-    print("-" * 20 + "\n")
+    plt.close()
 
-    # --- End of Phase 6 ---
+print("-" * 20 + "\n")
+# --- End of Phase 6 ---
 
-    print("--- Script Finished ---")
+print("--- Script Finished ---")
