@@ -358,7 +358,7 @@ else:
                 max_val = max(max_val_data + 0.1, 0.1) if not np.isnan(max_val_data) else 1.1
         
         plt.ylim(min_val, max_val)
-        plot_filename = os.path.join(VARIANCE_PLOT_DIR, f"variance_{fundamental_pauli_term}.png")
+        plot_filename = os.path.join(VARIANCE_PLOT_DIR, f"variance_{fundamental_pauli_term}.svg")
 
         try:
             plt.savefig(plot_filename, dpi=150, bbox_inches='tight')
@@ -546,7 +546,7 @@ else:
             else: # Default if no data to plot
                 plt.ylim(-1.2, 1.2)
 
-            plot_filename = os.path.join(DETAILED_FIT_PLOT_DIR, f"fit_{fundamental_pauli_term}_context_{source_3q_basis}.png")
+            plot_filename = os.path.join(DETAILED_FIT_PLOT_DIR, f"fit_{fundamental_pauli_term}_context_{source_3q_basis}.svg")
 
             try:
                 plt.savefig(plot_filename, dpi=150, bbox_inches='tight')
@@ -1012,75 +1012,138 @@ for q1_basis_char, (avg_p_key, avg_p_err_key) in q1_bases_map.items():
     idx_II_in_calc_order = CALC_PAULI_ORDER.index('II')
     print(f"    Projected p_II for q1={q1_basis_char}: {projected_prob_vector_calc_order[idx_II_in_calc_order]:.4f} ± {std_err_value_for_all_probs:.4f}")
 
-# --- Plotting Results ---
+# --- Plotting Results (Combined Graph) ---
 
 PLOT_DIR_PAULI_PROBS = "plots_pauli_error_probs_with_errors"
+calc_order_to_idx = {pauli: i for i, pauli in enumerate(CALC_PAULI_ORDER)}
 
 if not os.path.exists(PLOT_DIR_PAULI_PROBS):
     os.makedirs(PLOT_DIR_PAULI_PROBS)
 
-print(f"Pauli error probability plots will be saved to: {PLOT_DIR_PAULI_PROBS}")
+print(f"Combined Pauli error probability plot will be saved to: {PLOT_DIR_PAULI_PROBS}")
 
-# Create a mapping from CALC_PAULI_ORDER to indicees for easy reordering
-calc_order_to_idx = {pauli: i for i, pauli in enumerate(CALC_PAULI_ORDER)}
+# 1. Prepare data for the grouped bar chart
+labels_q1_basis = ['X', 'Y', 'Z']
+prob_data_by_q1_basis = {}
+error_data_by_q1_basis = {}
+data_available = True
 
-for q1_basis_char in ['X', 'Y', 'Z']:
-    prob_key = f'q1_{q1_basis_char}'
+for q1_char in labels_q1_basis:
+    prob_key = f'q1_{q1_char}'
 
     if prob_key not in projected_pauli_probabilities:
-        print(f"  No probability data to plot for q1={q1_basis_char}.")
-        continue
-    
-    # Get the probability vector in the calculation order
+        print(f"  Error: Probability data for q1={q1_char} ('{prob_key}') not found in projected_pauli_probabilities.")
+        data_available = False
+        break
+
+    if prob_key not in pauli_std_errors:
+        print(f"  Error: Error data for q1={q1_char} ('{prob_key}') not found in pauli_std_errors.")
+        data_available = False
+        break
+
+    # Get the probability and error vectors in the calculation order
     projected_prob_vector_calc = projected_pauli_probabilities[prob_key]
-    # Use the standard errors calculated for the raw probabilities
     error_vector_calc = pauli_std_errors.get(prob_key, np.zeros(N_PAULIS)) # Default to zero error if somehow missing
-    # Prepare data for plotting (excluding 'II')
-    # Reorder the probabilities according to PLOT_PAULI_ORDER
-    projected_probs_plot_no_II = np.array([projected_prob_vector_calc[calc_order_to_idx[p_str]] for p_str in PLOT_PAULI_ORDER_NO_II])
-    errors_plot_no_II = np.array([error_vector_calc[calc_order_to_idx[p_str]] for p_str in PLOT_PAULI_ORDER_NO_II])
-    plt.figure(figsize=(15, 7))
-    bars = plt.bar(PLOT_PAULI_ORDER_NO_II, projected_probs_plot_no_II, yerr=errors_plot_no_II, color='skyblue', capsize=5, ecolor='gray')
-    plt.xlabel("2-Qubit Pauli Term (on q2, q0)", fontsize=12)
-    plt.ylabel("Probability ($p_P$)", fontsize=12)
-    plt.title(f"Calculated Pauli Error Probabilities (excluding $p_{{II}}$) for (q2,q0) Subsystem\n(q1 measured in {q1_basis_char}-basis) with Error Bars", fontsize=14)
-    plt.xticks(rotation=45, ha="right", fontsize=10)
-    plt.yticks(fontsize=10)
-    plt.grid(axis='y', linestyle='--', alpha=0.7)
-    plt.axhline(0, color='black', linewidth=0.8) # Add a zero line for reference
+    # Reorder according to PLOT_PAULI_ORDER_NO_II
+    prob_data_by_q1_basis[q1_char] = np.array([projected_prob_vector_calc[calc_order_to_idx[p_str]] for p_str in PLOT_PAULI_ORDER_NO_II])
+    error_data_by_q1_basis[q1_char] = np.array([error_vector_calc[calc_order_to_idx[p_str]] for p_str in PLOT_PAULI_ORDER_NO_II])
 
-    # Add text labels on bars
-    for bar_idx, bar_item in enumerate(bars): # bar is a container, iterate its patches
-        yval = bar_item.get_height()
-        # Position text above the error bar
-        text_y_pos = yval + errors_plot_no_II[bar_idx] + 0.001
-        plt.text(bar_item.get_x() + bar_item.get_width()/2.0, text_y_pos, f'{yval:.3f}', ha='center', va='bottom', fontsize=8, color='black')
+if data_available:
+    n_pauli_terms = len(PLOT_PAULI_ORDER_NO_II)
+    x_indices = np.arange(n_pauli_terms)  # the label locations
+    bar_width = 0.25  # the width of the bars
+    fig, ax = plt.subplots(figsize=(18, 9)) # Adjusted figure size for better readability
+    # Plot bars for each q1 basis
+    rects_X = ax.bar(x_indices - bar_width, prob_data_by_q1_basis['X'], bar_width,
+                     yerr=error_data_by_q1_basis['X'], label='q1 in X-basis',
+                     color='skyblue', capsize=4, ecolor='gray')
+    rects_Y = ax.bar(x_indices, prob_data_by_q1_basis['Y'], bar_width,
+                     yerr=error_data_by_q1_basis['Y'], label='q1 in Y-basis',
+                     color='lightcoral', capsize=4, ecolor='gray')
+    rects_Z = ax.bar(x_indices + bar_width, prob_data_by_q1_basis['Z'], bar_width,
+                     yerr=error_data_by_q1_basis['Z'], label='q1 in Z-basis',
+                     color='lightgreen', capsize=4, ecolor='gray')
+    # Add some text for labels, title and custom x-axis tick labels, etc.
+    ax.set_xlabel("2-Qubit Pauli Term (on q2, q0)", fontsize=12)
+    ax.set_ylabel("Projected Probability ($p_P$)", fontsize=12)
+    ax.set_title(f"Calculated Pauli Error Probabilities (excluding $p_{{II}}$) for (q2,q0) Subsystem\nGrouped by q1 Measurement Basis (with Error Bars)", fontsize=14)
+    ax.set_xticks(x_indices)
+    ax.set_xticklabels(PLOT_PAULI_ORDER_NO_II, rotation=45, ha="right", fontsize=10)
+    ax.legend(title="q1 Measurement Context", fontsize='medium', title_fontsize='large')
+    ax.grid(axis='y', linestyle='--', alpha=0.7)
+    ax.axhline(0, color='black', linewidth=0.8) # Add a zero line
+
+    # Function to attach a text label above each bar, displaying its height.
+    def autolabel(rects, errors):
+        for i, rect in enumerate(rects):
+            height = rect.get_height()
+            error = errors[i]
+            # Position text above the error bar
+            text_y_pos = height + error + 0.000002 # Adjusted offset slightly
+
+            if height < 0 : # If bar is negative, position below
+                 text_y_pos = height - error - 0.002
+            
+            ax.text(rect.get_x() + rect.get_width() / 2., text_y_pos,
+                    f'{height:.4f}',
+                    ha='center', va='bottom' if height >=0 else 'top', fontsize=7, color='black')
+
+    autolabel(rects_X, error_data_by_q1_basis['X'])
+    autolabel(rects_Y, error_data_by_q1_basis['Y'])
+    autolabel(rects_Z, error_data_by_q1_basis['Z'])
+
+    # Dynamic y-limits to accommodate all data and error bars
+    all_probs_min = []
+    all_probs_max = []
+
+    for q1_char in labels_q1_basis:
+        all_probs_min.append(np.min(prob_data_by_q1_basis[q1_char] - error_data_by_q1_basis[q1_char]))
+        all_probs_max.append(np.max(prob_data_by_q1_basis[q1_char] + error_data_by_q1_basis[q1_char]))
     
-    # Dynamic y-limits to accommodate error bars
-    min_y_for_limit = np.min(projected_probs_plot_no_II - errors_plot_no_II) if (projected_probs_plot_no_II.size > 0) else 0
-    max_y_for_limit = np.max(projected_probs_plot_no_II + errors_plot_no_II) if (projected_probs_plot_no_II.size > 0) else 0.1
-    y_lower_bound = min(0, min_y_for_limit) - 0.01 # Add some padding
-    y_upper_bound = max(0, max_y_for_limit) + 0.01 # Add some padding
+    min_y_for_limit = np.min(all_probs_min) if all_probs_min else 0
+    max_y_for_limit = np.max(all_probs_max) if all_probs_max else 0.1
+    y_lower_bound = min(0, min_y_for_limit) - 0.005 # Add some padding
+    y_upper_bound = max(0, max_y_for_limit) + 0.005 # Add some padding
 
-    # Ensure a minimum range if all values are very close to zero
-    if ((y_upper_bound - y_lower_bound) < 0.05):
-        y_upper_bound = max(y_upper_bound, y_lower_bound + 0.05)
+    # Ensure a minimum range if all values are very close to zero or each other
+    if (y_upper_bound - y_lower_bound) < 0.02:
+        y_upper_bound = max(y_upper_bound, y_lower_bound + 0.02)
 
-        if (y_lower_bound == 0): # if all values were positive and small
-            y_lower_bound = min(0, y_upper_bound - 0.05)
+        if y_lower_bound >= -0.0001 and (y_upper_bound - y_lower_bound < 0.02): # if all positive and small range
+             y_lower_bound = min(-0.001, y_upper_bound - 0.02)
 
-    plt.ylim(y_lower_bound, y_upper_bound) # Adjust y-limits
-    plt.tight_layout() # Adjust layout to prevent labels from overlapping
-    plot_filename = os.path.join(PLOT_DIR_PAULI_PROBS, f"pauli_error_probs_q1_{q1_basis_char}.png")
+
+    ax.set_ylim(-0.001, 0.005)
+    # Calculate sum of plotted probabilities for each q1 context
+    sum_probs_X = np.sum(prob_data_by_q1_basis['X'])
+    sum_probs_Y = np.sum(prob_data_by_q1_basis['Y'])
+    sum_probs_Z = np.sum(prob_data_by_q1_basis['Z'])
+    total_error_text = (f"Total Plotted Error ($p_P$ for $P \\neq II$):\n"
+                        f"  q1=X: {sum_probs_X:.4f}\n"
+                        f"  q1=Y: {sum_probs_Y:.4f}\n"
+                        f"  q1=Z: {sum_probs_Z:.4f}")
+
+    # Adjust layout to make space for the text below the plot
+    fig.tight_layout(rect=[0, 0.05, 1, 1]) # rect=[left, bottom, right, top]
+                                          # Increase bottom margin to make space for text
+
+    # Add the total error text to the figure
+    # Using figure coordinates (0,0 is bottom left, 1,1 is top right of figure)
+    fig.text(0.75, 0.7, total_error_text, ha="center", va="bottom", fontsize=10,
+             bbox=dict(boxstyle="round,pad=0.3", fc="aliceblue", ec="lightsteelblue", lw=1))
+    combined_plot_filename = os.path.join(PLOT_DIR_PAULI_PROBS, "pauli_error_probs_combined_by_q1_basis.svg")
 
     try:
-        plt.savefig(plot_filename, dpi=150)
-        print(f"  Saved plot: {plot_filename}")
-    
+        plt.savefig(combined_plot_filename, dpi=150)
+        print(f"  Saved combined plot: {combined_plot_filename}")
+
     except Exception as e_save:
-        print(f"  Error saving plot {plot_filename}: {e_save}")
+        print(f"  Error saving combined plot {combined_plot_filename}: {e_save}")
     
-    plt.close()
+    plt.close(fig) # Close the figure to free memory
+
+else:
+    print("  Combined plot not generated due to missing data.")
 
 # --- Display probabilities and errors in a table ---
 
@@ -1400,7 +1463,7 @@ if ((y_lower_q1 >= -0.0001) and ((y_upper_q1 - y_lower_q1) < 0.02)):
 
 plt.ylim(y_lower_q1, y_upper_q1)
 plt.tight_layout()
-q1_plot_filename = os.path.join(PLOT_DIR_Q1_ERRORS, "q1_projected_pauli_error_probabilities.png")
+q1_plot_filename = os.path.join(PLOT_DIR_Q1_ERRORS, "q1_projected_pauli_error_probabilities.svg")
 
 try:
     plt.savefig(q1_plot_filename, dpi=150)
